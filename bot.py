@@ -26,16 +26,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── Flask health check ───────────────────────────────────────
+# Log config at startup so we can verify in Koyeb logs
+logger.info(f"API_ID     : {API_ID}")
+logger.info(f"AUTH_USERS : {AUTH_USERS}")
+logger.info(f"CHANNEL_ID : {CHANNEL_ID}")
+logger.info(f"BOT_TOKEN  : {BOT_TOKEN[:10]}...")
+
+# ─── Flask ────────────────────────────────────────────────────
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
-def home():
-    return "Bot is running!", 200
+def home(): return "Bot is running!", 200
 
 @flask_app.route("/health")
-def health():
-    return "OK", 200
+def health(): return "OK", 200
 
 # ─── Bot ──────────────────────────────────────────────────────
 bot = Client(
@@ -48,11 +52,7 @@ bot = Client(
 
 TEMP_DIR = Path("./downloads")
 TEMP_DIR.mkdir(exist_ok=True)
-
-# ─── Session state (per user) ─────────────────────────────────
-# Stores conversation state for each user
 user_state = {}
-# {user_id: {"step": "...", "html": "...", "data": {...}, ...}}
 
 # ─── Helpers ──────────────────────────────────────────────────
 def safe_filename(name, max_len=60):
@@ -77,7 +77,8 @@ async def make_thumbnail(fp):
     thumb = fp + ".jpg"
     try:
         subprocess.run(
-            ["ffmpeg","-y","-i",fp,"-ss","00:00:05","-vframes","1","-vf","scale=320:-1",thumb],
+            ["ffmpeg","-y","-i",fp,"-ss","00:00:05",
+             "-vframes","1","-vf","scale=320:-1",thumb],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         return thumb if os.path.exists(thumb) else None
     except: return None
@@ -96,11 +97,11 @@ async def progress_cb(current, total, msg, action="", name=""):
         await msg.edit(
             f"**{action}** `{name[:35]}`\n"
             f"`[{bar}]` {pct:.1f}%\n"
-            f"📦 {human_size(current)}/{human_size(total)} ⚡{human_size(int(spd))}/s ⏱{eta}s"
+            f"📦 {human_size(current)}/{human_size(total)} "
+            f"⚡{human_size(int(spd))}/s ⏱{eta}s"
         )
     except: pass
 
-# ─── HTML Parser ──────────────────────────────────────────────
 def parse_html(html):
     soup = BeautifulSoup(html, "html.parser")
     h1 = soup.find("h1")
@@ -116,7 +117,6 @@ def parse_html(html):
             pdfs.append({"name": text, "url": href})
     return {"batch_name": batch, "videos": videos, "pdfs": pdfs}
 
-# ─── Download / Upload ────────────────────────────────────────
 async def download_pdf(url, dest, prog_msg, name):
     try:
         async with aiohttp.ClientSession() as s:
@@ -132,7 +132,7 @@ async def download_pdf(url, dest, prog_msg, name):
                         if total: await progress_cb(done, total, prog_msg, "⬇️ PDF", name)
         return dest
     except Exception as e:
-        logger.error(f"PDF dl error: {e}"); return None
+        logger.error(f"PDF dl: {e}"); return None
 
 def dl_video(url, dest, name):
     out = str(dest / f"{safe_filename(name)}.%(ext)s")
@@ -156,9 +156,8 @@ async def send_video(client, cid, fp, caption, prog):
         await client.send_video(
             chat_id=cid, video=str(fp), caption=caption,
             duration=get_duration(str(fp)), thumb=thumb,
-            supports_streaming=True,
-            progress=progress_cb,
-            progress_args=(prog,"📤 Video", fp.name))
+            supports_streaming=True, progress=progress_cb,
+            progress_args=(prog, "📤 Video", fp.name))
         return True
     except FloodWait as e:
         await asyncio.sleep(e.value+5)
@@ -174,7 +173,7 @@ async def send_doc(client, cid, fp, caption, prog):
         await client.send_document(
             chat_id=cid, document=str(fp), caption=caption,
             progress=progress_cb,
-            progress_args=(prog,"📤 PDF", fp.name))
+            progress_args=(prog, "📤 PDF", fp.name))
         return True
     except FloodWait as e:
         await asyncio.sleep(e.value+5)
@@ -182,7 +181,6 @@ async def send_doc(client, cid, fp, caption, prog):
     except Exception as e:
         logger.error(f"doc upload: {e}"); return False
 
-# ─── Main processor ───────────────────────────────────────────
 async def process_course(client, m, html, channel, start_from, dl_v, dl_p):
     data   = parse_html(html)
     batch  = data["batch_name"]
@@ -207,9 +205,10 @@ async def process_course(client, m, html, channel, start_from, dl_v, dl_p):
             try:
                 vp = await asyncio.get_event_loop().run_in_executor(
                     None, dl_video, item["url"], sdir, f"{i:04d}_{name}")
-                if not vp: raise Exception("No file")
+                if not vp: raise Exception("No file downloaded")
                 await prog.edit(f"📤 Video [{i}/{len(videos)}]\n`{name}`")
-                if await send_video(client, channel, vp, f"🎬 {i}. **{name}**\n📚 `{batch}`", prog):
+                if await send_video(client, channel, vp,
+                                    f"🎬 {i}. **{name}**\n📚 `{batch}`", prog):
                     done += 1
                     await prog.edit(f"✅ [{i}/{len(videos)}] `{name}`")
                 else: raise Exception("Upload failed")
@@ -231,7 +230,8 @@ async def process_course(client, m, html, channel, start_from, dl_v, dl_p):
                 path = await download_pdf(item["url"], dest, prog, name)
                 if not path: raise Exception("Download failed")
                 await prog.edit(f"📤 PDF [{i}/{len(pdfs)}]\n`{name}`")
-                if await send_doc(client, channel, path, f"📄 {i}. **{name}**\n📚 `{batch}`", prog):
+                if await send_doc(client, channel, path,
+                                  f"📄 {i}. **{name}**\n📚 `{batch}`", prog):
                     done += 1
                     await prog.edit(f"✅ [{i}/{len(pdfs)}] `{name}`")
                 else: raise Exception("Upload failed")
@@ -245,7 +245,7 @@ async def process_course(client, m, html, channel, start_from, dl_v, dl_p):
             await asyncio.sleep(1)
 
     total = (len(videos) if dl_v else 0) + (len(pdfs) if dl_p else 0)
-    summary = (f"🏁 **Done! {batch}**\n✅ {done}/{total}\n❌ {len(failed)}")
+    summary = f"🏁 **Done! {batch}**\n✅ {done}/{total}\n❌ {len(failed)}"
     if failed: summary += "\n" + "\n".join(f"• {x}" for x in failed[:15])
     await m.reply(summary)
     await client.send_message(channel, summary)
@@ -253,47 +253,53 @@ async def process_course(client, m, html, channel, start_from, dl_v, dl_p):
         import shutil; shutil.rmtree(sdir, ignore_errors=True)
     except: pass
 
-# ─── Handlers ─────────────────────────────────────────────────
+# ─── Handlers (NO auth filter on /start) ──────────────────────
 @bot.on_message(filters.command("start"))
 async def cmd_start(client, m: Message):
+    logger.info(f"Received /start from user {m.from_user.id}")
     await m.reply(
         "👋 **Course Uploader Bot**\n\n"
         "I upload videos & PDFs from HTML course files to Telegram channels.\n\n"
-        "/upload — Start\n/help — Help"
+        "/upload — Start\n/help — Help\n/myid — Get your user ID"
     )
+
+@bot.on_message(filters.command("myid"))
+async def cmd_myid(client, m: Message):
+    await m.reply(f"Your Telegram user ID is: `{m.from_user.id}`")
 
 @bot.on_message(filters.command("help"))
 async def cmd_help(client, m: Message):
     await m.reply(
         "**Steps:**\n"
-        "1. `/upload`\n"
-        "2. Send HTML file\n"
+        "1. `/upload`\n2. Send HTML file\n"
         "3. Reply: `videos` / `pdfs` / `both`\n"
-        "4. Reply start number (e.g. `1`)\n"
-        "5. Reply channel or `/d` for default\n\n"
+        "4. Reply start number\n5. Reply channel or `/d`\n\n"
+        f"Auth users: `{AUTH_USERS}`\n"
         f"Default channel: `{CHANNEL_ID}`"
     )
 
-@bot.on_message(filters.command("upload") & filters.user(AUTH_USERS))
+@bot.on_message(filters.command("upload"))
 async def cmd_upload(client: Client, m: Message):
     uid = m.from_user.id
+    logger.info(f"/upload from {uid}, AUTH_USERS={AUTH_USERS}")
+    if AUTH_USERS and uid not in AUTH_USERS:
+        await m.reply(f"⛔ Not authorized.\nYour ID: `{uid}`\nAllowed: `{AUTH_USERS}`")
+        return
     user_state[uid] = {"step": "wait_file"}
     await m.reply("📂 Send the HTML course file now:")
 
-@bot.on_message(filters.command("cancel") & filters.user(AUTH_USERS))
+@bot.on_message(filters.command("cancel"))
 async def cmd_cancel(client, m: Message):
     user_state.pop(m.from_user.id, None)
     await m.reply("❌ Cancelled.")
 
-@bot.on_message(filters.user(AUTH_USERS) & ~filters.command(["start","help","upload","cancel"]))
+@bot.on_message(~filters.command(["start","help","upload","cancel","myid"]))
 async def handle_input(client: Client, m: Message):
     uid = m.from_user.id
     state = user_state.get(uid)
     if not state: return
-
     step = state.get("step")
 
-    # ── Step 1: receive HTML file ──────────────────────────────
     if step == "wait_file":
         if not m.document or not (m.document.file_name or "").endswith(".html"):
             await m.reply("❌ Please send a `.html` file.")
@@ -303,9 +309,7 @@ async def handle_input(client: Client, m: Message):
             html = f.read()
         os.remove(path)
         data = parse_html(html)
-        state["html"] = html
-        state["data"] = data
-        state["step"] = "wait_choice"
+        state.update({"html": html, "data": data, "step": "wait_choice"})
         await m.reply(
             f"📊 **{data['batch_name']}**\n\n"
             f"🎬 Videos: `{len(data['videos'])}`\n"
@@ -313,9 +317,8 @@ async def handle_input(client: Client, m: Message):
             "What to download?\n`videos` / `pdfs` / `both`"
         )
 
-    # ── Step 2: what to download ───────────────────────────────
     elif step == "wait_choice":
-        c = m.text.strip().lower() if m.text else "both"
+        c = (m.text or "both").strip().lower()
         state["dl_v"] = "video" in c or "both" in c or c in ["v","1","all"]
         state["dl_p"] = "pdf"   in c or "both" in c or c in ["p","2","all"]
         if not state["dl_v"] and not state["dl_p"]:
@@ -323,32 +326,25 @@ async def handle_input(client: Client, m: Message):
         state["step"] = "wait_start"
         await m.reply("From which number? (send `1` for beginning)")
 
-    # ── Step 3: start number ───────────────────────────────────
     elif step == "wait_start":
-        try:
-            state["start"] = int(m.text.strip())
-        except:
-            state["start"] = 1
+        try: state["start"] = int((m.text or "1").strip())
+        except: state["start"] = 1
         state["step"] = "wait_channel"
         await m.reply(f"Channel ID or `/d` for default (`{CHANNEL_ID}`):")
 
-    # ── Step 4: channel ────────────────────────────────────────
     elif step == "wait_channel":
-        txt = m.text.strip() if m.text else "/d"
+        txt = (m.text or "/d").strip()
         state["channel"] = CHANNEL_ID if "/d" in txt else txt
-        user_state.pop(uid, None)  # clear state
-
+        user_state.pop(uid, None)
         await m.reply(
             f"🚀 **Starting!**\n"
             f"📚 `{state['data']['batch_name']}`\n"
-            f"🎬 Videos: `{'Yes' if state['dl_v'] else 'No'}`\n"
-            f"📄 PDFs: `{'Yes' if state['dl_p'] else 'No'}`\n"
-            f"▶️ From: `{state['start']}`\n"
-            f"📢 `{state['channel']}`"
+            f"🎬 `{'Yes' if state['dl_v'] else 'No'}` | "
+            f"📄 `{'Yes' if state['dl_p'] else 'No'}`\n"
+            f"▶️ From `{state['start']}` → `{state['channel']}`"
         )
         await process_course(
-            client, m,
-            state["html"], state["channel"],
+            client, m, state["html"], state["channel"],
             state["start"], state["dl_v"], state["dl_p"]
         )
 
@@ -364,7 +360,7 @@ def start_bot():
     try:
         loop.run_until_complete(_run())
     except Exception as e:
-        logger.error(f"Bot error: {e}")
+        logger.error(f"Bot thread error: {e}")
 
 threading.Thread(target=start_bot, daemon=True).start()
 logger.info("Bot thread launched")
