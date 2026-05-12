@@ -1,7 +1,5 @@
 # ============================================================
-#  COURSE UPLOADER BOT
-#  Parses HTML course files → Downloads → Uploads to Telegram
-#  Web service mode (for Koyeb free tier)
+#  COURSE UPLOADER BOT - Web Service Mode (Koyeb Free Tier)
 # ============================================================
 
 import os
@@ -31,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ─── Flask health check app (required by Koyeb free tier) ─────
+# ─── Flask app (Koyeb health check) ───────────────────────────
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
@@ -59,7 +57,7 @@ TEMP_DIR.mkdir(exist_ok=True)
 
 def safe_filename(name: str, max_len: int = 60) -> str:
     name = re.sub(r'[\\/*?:"<>|]', "_", name).strip()
-    return name[:max_len] if len(name) > max_len else name
+    return name[:max_len]
 
 
 def human_size(size_bytes: int) -> str:
@@ -96,7 +94,6 @@ async def make_thumbnail(filepath: str):
 
 
 # ─── Progress bar ─────────────────────────────────────────────
-
 _last_edit = {}
 
 async def progress_cb(current, total, msg, action="Uploading", name=""):
@@ -111,13 +108,12 @@ async def progress_cb(current, total, msg, action="Uploading", name=""):
         bar = "█" * filled + "░" * (10 - filled)
         speed = current / max(now - _last_edit.get(f"{key}_start", now), 1)
         eta = int((total - current) / max(speed, 1))
-        text = (
+        await msg.edit(
             f"**{action}** `{name[:40]}`\n\n"
             f"`[{bar}]` **{pct:.1f}%**\n"
             f"📦 `{human_size(current)}` / `{human_size(total)}`\n"
             f"⚡ `{human_size(int(speed))}/s`  ⏱ `{eta}s`"
         )
-        await msg.edit(text)
     except FloodWait as e:
         await asyncio.sleep(e.value)
     except:
@@ -125,15 +121,11 @@ async def progress_cb(current, total, msg, action="Uploading", name=""):
 
 
 # ─── HTML Parser ──────────────────────────────────────────────
-
 def parse_html(html_content: str) -> dict:
     soup = BeautifulSoup(html_content, "html.parser")
     title = soup.find("h1")
     batch_name = title.get_text(strip=True) if title else "Unknown Batch"
-
-    videos = []
-    pdfs = []
-    others = []
+    videos, pdfs, others = [], [], []
 
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
@@ -147,29 +139,21 @@ def parse_html(html_content: str) -> dict:
         elif "other-link" in css:
             others.append({"name": text, "url": href})
 
-    return {
-        "batch_name": batch_name,
-        "videos": videos,
-        "pdfs": pdfs,
-        "others": others,
-    }
+    return {"batch_name": batch_name, "videos": videos, "pdfs": pdfs, "others": others}
 
 
 # ─── Downloaders ──────────────────────────────────────────────
-
-async def download_pdf(url: str, dest: Path, prog_msg=None, name=""):
+async def download_pdf(url, dest, prog_msg=None, name=""):
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=300)) as resp:
                 if resp.status != 200:
-                    logger.warning(f"PDF download failed [{resp.status}]: {url}")
                     return None
                 total = int(resp.headers.get("Content-Length", 0))
                 downloaded = 0
-                start = time.time()
-                _last_edit[f"{id(prog_msg)}_start"] = start
+                _last_edit[f"{id(prog_msg)}_start"] = time.time()
                 async with aiofiles.open(dest, "wb") as f:
-                    async for chunk in resp.content.iter_chunked(1024 * 64):
+                    async for chunk in resp.content.iter_chunked(65536):
                         await f.write(chunk)
                         downloaded += len(chunk)
                         if prog_msg and total:
@@ -180,34 +164,25 @@ async def download_pdf(url: str, dest: Path, prog_msg=None, name=""):
         return None
 
 
-def download_video_ytdlp(url: str, dest: Path, name: str):
-    out_template = str(dest / f"{safe_filename(name)}.%(ext)s")
+def download_video_ytdlp(url, dest, name):
+    out = str(dest / f"{safe_filename(name)}.%(ext)s")
     cmd = [
-        "yt-dlp",
-        "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "--merge-output-format", "mp4",
-        "--no-playlist",
-        "--retries", "10",
-        "--fragment-retries", "10",
+        "yt-dlp", "-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
+        "--merge-output-format", "mp4", "--no-playlist",
+        "--retries", "10", "--fragment-retries", "10",
         "--external-downloader", "aria2c",
         "--downloader-args", "aria2c:-x 16 -j 32 -k 1M",
-        "-o", out_template,
-        "--no-warnings",
-        "--quiet",
-        url,
+        "-o", out, "--no-warnings", "--quiet", url,
     ]
     try:
-        result = subprocess.run(cmd, timeout=3600)
-        if result.returncode != 0:
-            cmd_fallback = [c for c in cmd if c not in [
-                "--external-downloader", "aria2c",
-                "--downloader-args", "aria2c:-x 16 -j 32 -k 1M"
-            ]]
-            subprocess.run(cmd_fallback, timeout=3600)
+        r = subprocess.run(cmd, timeout=3600)
+        if r.returncode != 0:
+            cmd2 = [c for c in cmd if c not in ["--external-downloader", "aria2c", "--downloader-args", "aria2c:-x 16 -j 32 -k 1M"]]
+            subprocess.run(cmd2, timeout=3600)
         for ext in ["mp4", "mkv", "webm"]:
-            candidate = dest / f"{safe_filename(name)}.{ext}"
-            if candidate.exists():
-                return candidate
+            p = dest / f"{safe_filename(name)}.{ext}"
+            if p.exists():
+                return p
         matches = list(dest.glob(f"{safe_filename(name)}.*"))
         return matches[0] if matches else None
     except Exception as e:
@@ -216,21 +191,15 @@ def download_video_ytdlp(url: str, dest: Path, name: str):
 
 
 # ─── Uploaders ────────────────────────────────────────────────
-
 async def upload_video(client, channel_id, filepath, caption, prog_msg):
     thumb = await make_thumbnail(str(filepath))
     duration = get_duration(str(filepath))
     _last_edit[f"{id(prog_msg)}_start"] = time.time()
     try:
         await client.send_video(
-            chat_id=channel_id,
-            video=str(filepath),
-            caption=caption,
-            duration=duration,
-            thumb=thumb,
-            supports_streaming=True,
-            progress=progress_cb,
-            progress_args=(prog_msg, "Uploading Video", filepath.name),
+            chat_id=channel_id, video=str(filepath), caption=caption,
+            duration=duration, thumb=thumb, supports_streaming=True,
+            progress=progress_cb, progress_args=(prog_msg, "Uploading Video", filepath.name),
         )
         return True
     except FloodWait as e:
@@ -248,11 +217,8 @@ async def upload_pdf(client, channel_id, filepath, caption, prog_msg):
     _last_edit[f"{id(prog_msg)}_start"] = time.time()
     try:
         await client.send_document(
-            chat_id=channel_id,
-            document=str(filepath),
-            caption=caption,
-            progress=progress_cb,
-            progress_args=(prog_msg, "Uploading PDF", filepath.name),
+            chat_id=channel_id, document=str(filepath), caption=caption,
+            progress=progress_cb, progress_args=(prog_msg, "Uploading PDF", filepath.name),
         )
         return True
     except FloodWait as e:
@@ -264,47 +230,40 @@ async def upload_pdf(client, channel_id, filepath, caption, prog_msg):
 
 
 # ─── Core processor ───────────────────────────────────────────
-
 async def process_course(client, m, html_content, channel_id,
                          start_from=1, dl_videos=True, dl_pdfs=True):
     data = parse_html(html_content)
     batch = data["batch_name"]
-    videos = data["videos"]
-    pdfs = data["pdfs"]
+    videos, pdfs = data["videos"], data["pdfs"]
 
     summary = (
         f"📚 **{batch}**\n\n"
         f"🎬 Videos: `{len(videos)}`\n"
-        f"📄 PDFs: `{len(pdfs)}`\n\n"
-        f"Starting from: `{start_from}`"
+        f"📄 PDFs: `{len(pdfs)}`\n"
+        f"▶️ From: `{start_from}`"
     )
     await client.send_message(channel_id, summary)
     await m.reply(f"✅ Parsed!\n\n{summary}\n\nProcessing...")
 
     session_dir = TEMP_DIR / safe_filename(batch)
     session_dir.mkdir(exist_ok=True)
-
-    total_items = (len(videos) if dl_videos else 0) + (len(pdfs) if dl_pdfs else 0)
-    done = 0
-    failed = []
+    done, failed = 0, []
 
     if dl_videos:
         for idx, item in enumerate(videos, start=1):
             if idx < start_from:
                 continue
             name = item["name"] or f"Video {idx}"
-            url = item["url"]
             caption = f"🎬 **{idx}. {name}**\n📚 `{batch}`"
             prog = await m.reply(f"⏳ **[{idx}/{len(videos)}]** Downloading:\n`{name}`")
             try:
                 video_path = await asyncio.get_event_loop().run_in_executor(
-                    None, download_video_ytdlp, url, session_dir, f"{idx:04d}_{name}"
+                    None, download_video_ytdlp, item["url"], session_dir, f"{idx:04d}_{name}"
                 )
                 if not video_path:
-                    raise Exception("yt-dlp returned no file")
+                    raise Exception("Download failed")
                 await prog.edit(f"📤 **[{idx}/{len(videos)}]** Uploading:\n`{name}`")
-                ok = await upload_video(client, channel_id, video_path, caption, prog)
-                if ok:
+                if await upload_video(client, channel_id, video_path, caption, prog):
                     done += 1
                     await prog.edit(f"✅ **[{idx}/{len(videos)}]** Done: `{name}`")
                 else:
@@ -321,17 +280,15 @@ async def process_course(client, m, html_content, channel_id,
     if dl_pdfs:
         for idx, item in enumerate(pdfs, start=1):
             name = item["name"] or f"PDF {idx}"
-            url = item["url"]
-            caption = f"📄 **{idx}. {name}**\n📚 `{batch}`"
             dest = session_dir / f"pdf_{idx:04d}_{safe_filename(name)}.pdf"
+            caption = f"📄 **{idx}. {name}**\n📚 `{batch}`"
             prog = await m.reply(f"⏳ **[{idx}/{len(pdfs)}]** Downloading PDF:\n`{name}`")
             try:
-                path = await download_pdf(url, dest, prog, name)
+                path = await download_pdf(item["url"], dest, prog, name)
                 if not path:
                     raise Exception("Download failed")
-                await prog.edit(f"📤 **[{idx}/{len(pdfs)}]** Uploading PDF:\n`{name}`")
-                ok = await upload_pdf(client, channel_id, path, caption, prog)
-                if ok:
+                await prog.edit(f"📤 **[{idx}/{len(pdfs)}]** Uploading:\n`{name}`")
+                if await upload_pdf(client, channel_id, path, caption, prog):
                     done += 1
                     await prog.edit(f"✅ **[{idx}/{len(pdfs)}]** Done: `{name}`")
                 else:
@@ -345,60 +302,50 @@ async def process_course(client, m, html_content, channel_id,
                     except: pass
             await asyncio.sleep(1)
 
+    total = (len(videos) if dl_videos else 0) + (len(pdfs) if dl_pdfs else 0)
     result = (
         f"🏁 **Done!** `{batch}`\n\n"
-        f"✅ Uploaded: `{done}/{total_items}`\n"
+        f"✅ Uploaded: `{done}/{total}`\n"
         f"❌ Failed: `{len(failed)}`"
     )
     if failed:
-        result += "\n\n**Failed items:**\n" + "\n".join(f"• {x}" for x in failed[:20])
+        result += "\n\n**Failed:**\n" + "\n".join(f"• {x}" for x in failed[:20])
     await m.reply(result)
     await client.send_message(channel_id, result)
-
     try:
-        import shutil
-        shutil.rmtree(session_dir, ignore_errors=True)
+        import shutil; shutil.rmtree(session_dir, ignore_errors=True)
     except: pass
 
 
 # ─── Bot Handlers ─────────────────────────────────────────────
-
 @bot.on_message(filters.command("start"))
 async def start_cmd(client, m: Message):
     await m.reply(
         "👋 **Course Uploader Bot**\n\n"
-        "Send me an HTML course file and I'll upload all videos + PDFs to the channel.\n\n"
-        "**Commands:**\n"
-        "/upload — Upload course from HTML file\n"
-        "/help — Show help"
+        "Send me an HTML course file and I'll upload all videos + PDFs to your channel.\n\n"
+        "**Commands:**\n/upload — Start upload\n/help — Help"
     )
-
 
 @bot.on_message(filters.command("help"))
 async def help_cmd(client, m: Message):
     await m.reply(
         "**How to use:**\n\n"
-        "1. Send `/upload` command\n"
-        "2. Send the HTML file\n"
-        "3. Choose: Videos / PDFs / Both\n"
-        "4. Set start position\n"
-        "5. Bot uploads everything to channel ✅\n\n"
-        f"**Output channel:** `{CHANNEL_ID}`"
+        "1. `/upload`\n2. Send HTML file\n"
+        "3. Choose: `videos` / `pdfs` / `both`\n"
+        "4. Set start number\n5. Done ✅\n\n"
+        f"Channel: `{CHANNEL_ID}`"
     )
-
 
 @bot.on_message(filters.command("upload") & filters.user(AUTH_USERS))
 async def upload_cmd(client: Client, m: Message):
-    await m.reply("📂 **Send me the HTML course file:**")
+    await m.reply("📂 Send the HTML course file:")
     try:
         file_msg = await client.listen(m.chat.id, timeout=120)
     except:
-        await m.reply("⏰ Timed out.")
-        return
+        await m.reply("⏰ Timed out."); return
 
     if not file_msg.document:
-        await m.reply("❌ Please send a valid HTML file.")
-        return
+        await m.reply("❌ Send a valid HTML file."); return
 
     html_path = await file_msg.download(file_name=str(TEMP_DIR / file_msg.document.file_name))
     with open(html_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -406,17 +353,15 @@ async def upload_cmd(client: Client, m: Message):
     os.remove(html_path)
 
     data = parse_html(html_content)
-    summary = (
-        f"📊 **Found in `{data['batch_name']}`:**\n\n"
+    await m.reply(
+        f"📊 **`{data['batch_name']}`**\n\n"
         f"🎬 Videos: `{len(data['videos'])}`\n"
         f"📄 PDFs: `{len(data['pdfs'])}`\n\n"
-        "What to download? Reply: `videos` / `pdfs` / `both`"
+        "What to download? `videos` / `pdfs` / `both`"
     )
-    await m.reply(summary)
 
     try:
-        choice_msg = await client.listen(m.chat.id, timeout=60)
-        choice = choice_msg.text.strip().lower()
+        choice = (await client.listen(m.chat.id, timeout=60)).text.strip().lower()
     except:
         choice = "both"
 
@@ -425,17 +370,16 @@ async def upload_cmd(client: Client, m: Message):
     if not dl_videos and not dl_pdfs:
         dl_videos = dl_pdfs = True
 
-    await m.reply(f"From which number? (Send `1` for beginning)")
+    await m.reply("From which number? (send `1` for beginning)")
     try:
-        start_msg = await client.listen(m.chat.id, timeout=30)
-        start_from = int(start_msg.text.strip())
+        start_from = int((await client.listen(m.chat.id, timeout=30)).text.strip())
     except:
         start_from = 1
 
-    await m.reply(f"Channel ID or /d for default (`{CHANNEL_ID}`):")
+    await m.reply(f"Channel ID or `/d` for default (`{CHANNEL_ID}`):")
     try:
-        ch_msg = await client.listen(m.chat.id, timeout=30)
-        channel = CHANNEL_ID if "/d" in ch_msg.text else ch_msg.text.strip()
+        ch_text = (await client.listen(m.chat.id, timeout=30)).text.strip()
+        channel = CHANNEL_ID if "/d" in ch_text else ch_text
     except:
         channel = CHANNEL_ID
 
@@ -447,31 +391,33 @@ async def upload_cmd(client: Client, m: Message):
         f"▶️ From: `{start_from}`\n"
         f"📢 Channel: `{channel}`"
     )
-
-    await process_course(client, m, html_content, channel,
-                         start_from, dl_videos, dl_pdfs)
+    await process_course(client, m, html_content, channel, start_from, dl_videos, dl_pdfs)
 
 
-@bot.on_message(filters.document & filters.user(AUTH_USERS))
-async def auto_html(client: Client, m: Message):
-    fname = m.document.file_name or ""
-    if not fname.lower().endswith(".html"):
-        return
-    await m.reply("📂 HTML file detected! Use `/upload` for full control.")
-
-
-# ─── Run bot in background thread ────────────────────────────
-
-def run_bot():
+# ─── Start bot in background (no signal handling) ─────────────
+def start_bot_in_thread():
+    """Run the bot using start/stop instead of run() to avoid signal issues."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    logger.info("Bot thread starting...")
-    bot.run()
 
-bot_thread = threading.Thread(target=run_bot, daemon=True)
+    async def _run():
+        await bot.start()
+        logger.info("Bot started successfully in background thread")
+        # Keep alive forever
+        while True:
+            await asyncio.sleep(60)
+
+    try:
+        loop.run_until_complete(_run())
+    except Exception as e:
+        logger.error(f"Bot thread error: {e}")
+
+
+bot_thread = threading.Thread(target=start_bot_in_thread, daemon=True)
 bot_thread.start()
+logger.info("Bot background thread launched")
 
-# ─── Flask runs as main process (Koyeb web service) ──────────
+# ─── Flask is the main process ────────────────────────────────
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     logger.info(f"Starting Flask on port {port}")
