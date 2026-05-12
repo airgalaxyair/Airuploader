@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# Install system dependencies
 RUN apt-get update && apt-get install -y \
     ffmpeg \
     aria2 \
@@ -13,4 +12,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-CMD ["python", "-u", "bot.py"]
+EXPOSE 8000
+
+CMD gunicorn bot:flask_app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --preload

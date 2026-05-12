@@ -5,3 +5,5 @@ aiohttp
 aiofiles
 beautifulsoup4
 yt-dlp
+flask
+gunicorn
