@@ -1,0 +1,7 @@
+pyrogram==2.0.106
+pyromod
+TgCrypto
+aiohttp
+aiofiles
+beautifulsoup4
+yt-dlp
