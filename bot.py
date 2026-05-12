@@ -1,5 +1,6 @@
 # ============================================================
-#  COURSE UPLOADER BOT - Web Service Mode (Koyeb Free Tier)
+#  COURSE UPLOADER BOT
+#  Bot runs on main thread, Flask runs in background thread
 # ============================================================
 
 import os
@@ -13,7 +14,7 @@ import subprocess
 import threading
 from pathlib import Path
 from bs4 import BeautifulSoup
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message
 from pyrogram.errors import FloodWait
 from vars import API_ID, API_HASH, BOT_TOKEN, AUTH_USERS, CHANNEL_ID
@@ -26,13 +27,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Log config at startup so we can verify in Koyeb logs
 logger.info(f"API_ID     : {API_ID}")
 logger.info(f"AUTH_USERS : {AUTH_USERS}")
 logger.info(f"CHANNEL_ID : {CHANNEL_ID}")
 logger.info(f"BOT_TOKEN  : {BOT_TOKEN[:10]}...")
 
-# ─── Flask ────────────────────────────────────────────────────
+# ─── Flask in background thread ───────────────────────────────
 flask_app = Flask(__name__)
 
 @flask_app.route("/")
@@ -41,7 +41,15 @@ def home(): return "Bot is running!", 200
 @flask_app.route("/health")
 def health(): return "OK", 200
 
-# ─── Bot ──────────────────────────────────────────────────────
+def run_flask():
+    port = int(os.environ.get("PORT", 8000))
+    logger.info(f"Flask starting on port {port}")
+    flask_app.run(host="0.0.0.0", port=port)
+
+flask_thread = threading.Thread(target=run_flask, daemon=True)
+flask_thread.start()
+
+# ─── Bot on main thread ───────────────────────────────────────
 bot = Client(
     "CourseUploaderBot",
     api_id=API_ID,
@@ -205,10 +213,10 @@ async def process_course(client, m, html, channel, start_from, dl_v, dl_p):
             try:
                 vp = await asyncio.get_event_loop().run_in_executor(
                     None, dl_video, item["url"], sdir, f"{i:04d}_{name}")
-                if not vp: raise Exception("No file downloaded")
+                if not vp: raise Exception("No file")
                 await prog.edit(f"📤 Video [{i}/{len(videos)}]\n`{name}`")
                 if await send_video(client, channel, vp,
-                                    f"🎬 {i}. **{name}**\n📚 `{batch}`", prog):
+                        f"🎬 {i}. **{name}**\n📚 `{batch}`", prog):
                     done += 1
                     await prog.edit(f"✅ [{i}/{len(videos)}] `{name}`")
                 else: raise Exception("Upload failed")
@@ -231,7 +239,7 @@ async def process_course(client, m, html, channel, start_from, dl_v, dl_p):
                 if not path: raise Exception("Download failed")
                 await prog.edit(f"📤 PDF [{i}/{len(pdfs)}]\n`{name}`")
                 if await send_doc(client, channel, path,
-                                  f"📄 {i}. **{name}**\n📚 `{batch}`", prog):
+                        f"📄 {i}. **{name}**\n📚 `{batch}`", prog):
                     done += 1
                     await prog.edit(f"✅ [{i}/{len(pdfs)}] `{name}`")
                 else: raise Exception("Upload failed")
@@ -253,40 +261,39 @@ async def process_course(client, m, html, channel, start_from, dl_v, dl_p):
         import shutil; shutil.rmtree(sdir, ignore_errors=True)
     except: pass
 
-# ─── Handlers (NO auth filter on /start) ──────────────────────
+# ─── Handlers ─────────────────────────────────────────────────
 @bot.on_message(filters.command("start"))
 async def cmd_start(client, m: Message):
-    logger.info(f"Received /start from user {m.from_user.id}")
+    logger.info(f"/start from {m.from_user.id}")
     await m.reply(
         "👋 **Course Uploader Bot**\n\n"
-        "I upload videos & PDFs from HTML course files to Telegram channels.\n\n"
-        "/upload — Start\n/help — Help\n/myid — Get your user ID"
+        "/upload — Upload course\n"
+        "/myid — Get your user ID\n"
+        "/help — Help"
     )
 
 @bot.on_message(filters.command("myid"))
 async def cmd_myid(client, m: Message):
-    await m.reply(f"Your Telegram user ID is: `{m.from_user.id}`")
+    await m.reply(f"Your user ID: `{m.from_user.id}`")
 
 @bot.on_message(filters.command("help"))
 async def cmd_help(client, m: Message):
     await m.reply(
-        "**Steps:**\n"
-        "1. `/upload`\n2. Send HTML file\n"
-        "3. Reply: `videos` / `pdfs` / `both`\n"
-        "4. Reply start number\n5. Reply channel or `/d`\n\n"
         f"Auth users: `{AUTH_USERS}`\n"
-        f"Default channel: `{CHANNEL_ID}`"
+        f"Channel: `{CHANNEL_ID}`\n\n"
+        "Steps:\n1. /upload\n2. Send HTML\n"
+        "3. videos/pdfs/both\n4. start number\n5. channel or /d"
     )
 
 @bot.on_message(filters.command("upload"))
 async def cmd_upload(client: Client, m: Message):
     uid = m.from_user.id
-    logger.info(f"/upload from {uid}, AUTH_USERS={AUTH_USERS}")
+    logger.info(f"/upload from {uid}")
     if AUTH_USERS and uid not in AUTH_USERS:
-        await m.reply(f"⛔ Not authorized.\nYour ID: `{uid}`\nAllowed: `{AUTH_USERS}`")
+        await m.reply(f"⛔ Not authorized. Your ID: `{uid}`")
         return
     user_state[uid] = {"step": "wait_file"}
-    await m.reply("📂 Send the HTML course file now:")
+    await m.reply("📂 Send the HTML course file:")
 
 @bot.on_message(filters.command("cancel"))
 async def cmd_cancel(client, m: Message):
@@ -302,7 +309,7 @@ async def handle_input(client: Client, m: Message):
 
     if step == "wait_file":
         if not m.document or not (m.document.file_name or "").endswith(".html"):
-            await m.reply("❌ Please send a `.html` file.")
+            await m.reply("❌ Send a `.html` file.")
             return
         path = await m.download(file_name=str(TEMP_DIR / m.document.file_name))
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -311,10 +318,10 @@ async def handle_input(client: Client, m: Message):
         data = parse_html(html)
         state.update({"html": html, "data": data, "step": "wait_choice"})
         await m.reply(
-            f"📊 **{data['batch_name']}**\n\n"
+            f"📊 **{data['batch_name']}**\n"
             f"🎬 Videos: `{len(data['videos'])}`\n"
             f"📄 PDFs: `{len(data['pdfs'])}`\n\n"
-            "What to download?\n`videos` / `pdfs` / `both`"
+            "Reply: `videos` / `pdfs` / `both`"
         )
 
     elif step == "wait_choice":
@@ -324,7 +331,7 @@ async def handle_input(client: Client, m: Message):
         if not state["dl_v"] and not state["dl_p"]:
             state["dl_v"] = state["dl_p"] = True
         state["step"] = "wait_start"
-        await m.reply("From which number? (send `1` for beginning)")
+        await m.reply("From which number? (e.g. `1`)")
 
     elif step == "wait_start":
         try: state["start"] = int((m.text or "1").strip())
@@ -337,9 +344,9 @@ async def handle_input(client: Client, m: Message):
         state["channel"] = CHANNEL_ID if "/d" in txt else txt
         user_state.pop(uid, None)
         await m.reply(
-            f"🚀 **Starting!**\n"
+            f"🚀 Starting!\n"
             f"📚 `{state['data']['batch_name']}`\n"
-            f"🎬 `{'Yes' if state['dl_v'] else 'No'}` | "
+            f"🎬 `{'Yes' if state['dl_v'] else 'No'}` "
             f"📄 `{'Yes' if state['dl_p'] else 'No'}`\n"
             f"▶️ From `{state['start']}` → `{state['channel']}`"
         )
@@ -348,24 +355,12 @@ async def handle_input(client: Client, m: Message):
             state["start"], state["dl_v"], state["dl_p"]
         )
 
-# ─── Start bot in background thread ───────────────────────────
-def start_bot():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    async def _run():
-        await bot.start()
-        logger.info("✅ Bot started successfully!")
-        while True:
-            await asyncio.sleep(3600)
-    try:
-        loop.run_until_complete(_run())
-    except Exception as e:
-        logger.error(f"Bot thread error: {e}")
+# ─── Run ──────────────────────────────────────────────────────
+async def main():
+    await bot.start()
+    logger.info("✅ Bot started on main thread!")
+    await idle()
+    await bot.stop()
 
-threading.Thread(target=start_bot, daemon=True).start()
-logger.info("Bot thread launched")
-
-# ─── Flask main process ───────────────────────────────────────
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    flask_app.run(host="0.0.0.0", port=port)
+    asyncio.run(main())
